@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+<title>Minecraft-lite Web — Play (Local three.module.js)</title>
+<style>
+  html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:#06121a;color:#d6eef0}
+  #ui {position:fixed;left:12px;top:12px;z-index:30}
+  #hint{background:rgba(0,0,0,0.35);padding:8px 10px;border-radius:8px;font-size:13px}
+  #inventory{position:fixed;right:12px;bottom:12px;z-index:30;display:flex;gap:8px}
+  .slot{background:rgba(0,0,0,0.35);padding:8px 10px;border-radius:8px;min-width:44px;text-align:center;cursor:pointer}
+  .slot.active{outline:2px solid #7fffd4}
+  #mobile-controls{position:fixed;left:12px;bottom:12px;z-index:25;display:flex;align-items:center;gap:12px}
+  #joyBase{width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,0.04);position:relative;touch-action:none}
+  #joyKnob{width:48px;height:48px;border-radius:50%;background:linear-gradient(#6ff5e8,#2dd4bf);position:absolute;left:31px;top:31px;touch-action:none}
+  #lookLayer{position:fixed;right:0;top:0;bottom:0;left:40%;z-index:24;touch-action:none} /* area to drag-look on mobile */
+  canvas{display:block;width:100%;height:100vh}
+  #loading{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#052428;padding:14px;border-radius:10px}
+  .btn{background:rgba(255,255,255,0.06);padding:8px 10px;border-radius:8px;cursor:pointer}
+</style>
+</head>
+<body>
+  <div id="loading">Loading... (Three.js)</div>
+  <div id="ui">
+    <div id="hint">Klik/ketuk untuk fokus. Desktop: klik canvas. Gerak: WASD / joystick. LeftClick/ Tap kiri = break, RightClick / Tap kanan = place, R = ganti blok</div>
+  </div>
+
+  <div id="inventory"></div>
+
+  <div id="mobile-controls" style="display:none">
+    <div id="joyBase"><div id="joyKnob"></div></div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="btn" id="btnBreak">BREAK</div>
+      <div class="btn" id="btnPlace">PLACE</div>
+    </div>
+  </div>
+
+  <div id="lookLayer"></div>
+
+<script type="module">
+/*
+  Versi lokal (imports dari file lokal):
+  - three.module.js       (simpan di folder sama)
+  - PointerLockControls.js (simpan di folder sama)
+  Setelah menyimpan kedua file library, buka file ini (minecraft_lite_web.html) di browser.
+*/
+
+import * as THREE from './three.module.js';
+import { PointerLockControls } from './PointerLockControls.js';
+
+// ------- (Game code begins) -------
+// The following code is the same Minecraft-lite prototype previously provided.
+// For brevity this file contains a compact voxel demo using InstancedMesh.
+// If you need the fully commented original, tell aku dan aku kirim versi panjang.
+
+const CHUNK_W = 32, CHUNK_H = 10, BLOCK_SIZE = 1;
+const TYPES = [
+  {id:0,name:'Air', color: null},
+  {id:1,name:'Dirt', color: '#6b482f'},
+  {id:2,name:'Grass', color: '#3aa34b'},
+  {id:3,name:'Stone', color: '#8a8f99'},
+  {id:4,name:'Sand', color: '#e6d29a'},
+  {id:5,name:'Wood', color: '#7b4f2a'}
+];
+
+function seededRandom(seed) {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function() { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; }
+}
+const rnd = seededRandom(12345);
+const world = { w: CHUNK_W, h: CHUNK_H, d: CHUNK_W };
+const blocks = new Uint8Array(world.w * world.h * world.d);
+function idx(x,y,z){ return (y * world.d + z) * world.w + x; }
+for(let x=0;x<world.w;x++){
+  for(let z=0;z<world.d;z++){
+    const base = 3 + Math.floor(3 * Math.sin(x*0.3) + 2 * (rnd()*0.9));
+    for(let y=0;y<world.h;y++){
+      let t=0;
+      if(y <= base - 1) t=3;
+      if(y === base) t=2;
+      if(y < base && y > base - 3) t=1;
+      if(y < 1) t=4;
+      if(y === base + 1 && rnd() > 0.96) t=5;
+      blocks[idx(x,y,z)] = t;
+    }
+  }
+}
+
+// Three.js scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x071921, 0.011);
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.3, 2000);
+camera.position.set(world.w/2, world.h+2, world.d/2);
+const renderer = new THREE.WebGLRenderer({ antialias:false, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,1.5));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const hemi = new THREE.HemisphereLight(0xddeeff, 0x0d2126, 0.9); scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.6); dir.position.set(5,10,2); scene.add(dir);
+const ambient = new THREE.AmbientLight(0x7aa6a0, 0.2); scene.add(ambient);
+
+// Instanced voxel meshes
+const BOX = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+const MAX_INST = world.w * world.h * world.d;
+const instanced = {};
+for(const t of TYPES){
+  if(t.id===0) continue;
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(t.color) });
+  const mesh = new THREE.InstancedMesh(BOX, mat, MAX_INST);
+  mesh.count = 0;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(mesh);
+  instanced[t.id] = mesh;
+}
+function rebuildInstances(){
+  for(const k in instanced) instanced[k].count = 0;
+  const tmp = new THREE.Object3D();
+  let counters = {}; for(const t of TYPES) counters[t.id]=0;
+  for(let x=0;x<world.w;x++){
+    for(let y=0;y<world.h;y++){
+      for(let z=0;z<world.d;z++){
+        const t = blocks[idx(x,y,z)];
+        if(t===0) continue;
+        tmp.position.set(x+0.5, y+0.5, z+0.5);
+        tmp.updateMatrix();
+        const mesh = instanced[t];
+        const id = counters[t]++;
+        mesh.setMatrixAt(id, tmp.matrix);
+        mesh.count = id+1;
+      }
+    }
+  }
+  for(const k in instanced) instanced[k].instanceMatrix.needsUpdate = true;
+}
+rebuildInstances();
+
+// Controls & physics
+const controls = new PointerLockControls(camera, document.body);
+const raycaster = new THREE.Raycaster();
+let move = { fwd:false, back:false, left:false, right:false };
+let playerPos = new THREE.Vector3(world.w/2 + 0.5, world.h + 1.6, world.d/2 + 0.5);
+let velocity = new THREE.Vector3();
+let canJump = false;
+const GRAVITY = -20;
+
+window.addEventListener('keydown',(e)=>{
+  if(e.code === 'KeyW') move.fwd = true;
+  if(e.code === 'KeyS') move.back = true;
+  if(e.code === 'KeyA') move.left = true;
+  if(e.code === 'KeyD') move.right = true;
+  if(e.code === 'Space' && canJump){ velocity.y = 6; canJump=false; }
+  if(e.key === 'r' || e.key === 'R'){ selected = (selected + 1) % TYPES.length; updateInventory(); }
+});
+window.addEventListener('keyup',(e)=>{
+  if(e.code === 'KeyW') move.fwd = false;
+  if(e.code === 'KeyS') move.back = false;
+  if(e.code === 'KeyA') move.left = false;
+  if(e.code === 'KeyD') move.right = false;
+});
+
+// interaction helpers
+function worldCoordinateFromRay(){
+  const origin = camera.getWorldPosition(new THREE.Vector3());
+  const dirv = new THREE.Vector3(); camera.getWorldDirection(dirv);
+  raycaster.set(origin, dirv);
+  const maxD = 8, step=0.2;
+  for(let d=0; d<maxD; d+=step){
+    const p = origin.clone().addScaledVector(dirv, d);
+    const bx = Math.floor(p.x), by=Math.floor(p.y), bz=Math.floor(p.z);
+    if(bx>=0 && bx<world.w && by>=0 && by<world.h && bz>=0 && bz<world.d){
+      const t = blocks[idx(bx,by,bz)];
+      if(t !== 0){
+        const local = new THREE.Vector3(p.x - bx - 0.5, p.y - by - 0.5, p.z - bz - 0.5);
+        const ax = Math.abs(local.x), ay=Math.abs(local.y), az=Math.abs(local.z);
+        let normal = new THREE.Vector3();
+        if(ax > ay && ax > az) normal.x = local.x > 0 ? 1 : -1;
+        else if(ay > ax && ay > az) normal.y = local.y > 0 ? 1 : -1;
+        else normal.z = local.z > 0 ? 1 : -1;
+        return {hitPoint:p, blockPos:new THREE.Vector3(bx,by,bz), normal, type:t};
+      }
+    }
+  }
+  return null;
+}
+function doBreak(){ const res = worldCoordinateFromRay(); if(!res) return; const b = res.blockPos; blocks[idx(b.x,b.y,b.z)] = 0; rebuildInstances(); }
+function doPlace(){ const res = worldCoordinateFromRay(); if(!res) return; const p = res.blockPos, n = res.normal; const tx=p.x+n.x, ty=p.y+n.y, tz=p.z+n.z; if(tx>=0 && tx<world.w && ty>=0 && ty<world.h && tz>=0 && tz<world.d){ if(selected===0) return; blocks[idx(tx,ty,tz)] = selected; rebuildInstances(); } }
+
+// mobile UI wiring (show controls on mobile)
+const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+const mobileControls = document.getElementById('mobile-controls');
+const joyBase = document.getElementById('joyBase');
+const joyKnob = document.getElementById('joyKnob');
+const lookLayer = document.getElementById('lookLayer');
+const btnBreak = document.getElementById('btnBreak');
+const btnPlace = document.getElementById('btnPlace');
+if(isMobile){ mobileControls.style.display='flex'; document.getElementById('loading').style.display='none'; }
+let joyCenter={x:0,y:0},joyMax=36;
+function layoutJoy(){ const r=joyBase.getBoundingClientRect(); joyCenter.x=r.left+r.width/2; joyCenter.y=r.top+r.height/2; joyMax=r.width/2-12; } layoutJoy();
+window.addEventListener('resize', ()=> setTimeout(layoutJoy,120));
+function handleJoyMove(t){
+  const dx = t.clientX - joyCenter.x, dy = t.clientY - joyCenter.y, dist=Math.hypot(dx,dy), nx=dx/Math.max(1,dist), ny=dy/Math.max(1,dist), mag=Math.min(dist,joyMax)/joyMax;
+  move.fwd = ny < -0.35; move.back = ny > 0.35; move.left = nx < -0.35; move.right = nx > 0.35;
+  joyKnob.style.transform = `translate(${Math.max(-joyMax,Math.min(joyMax,dx))}px, ${Math.max(-joyMax,Math.min(joyMax,dy))}px)`;
+}
+joyBase.addEventListener('touchstart',(e)=>{ e.preventDefault(); layoutJoy(); handleJoyMove(e.touches[0]); }, {passive:false});
+joyBase.addEventListener('touchmove',(e)=>{ e.preventDefault(); handleJoyMove(e.touches[0]); }, {passive:false});
+joyBase.addEventListener('touchend',(e)=>{ joyKnob.style.transform='translate(0px,0px)'; move.fwd=move.back=move.left=move.right=false; }, {passive:false});
+lookLayer.addEventListener('touchstart',(e)=>{ lookDown=true; lastTouch.x=e.touches[0].clientX; lastTouch.y=e.touches[0].clientY; }, {passive:false});
+lookLayer.addEventListener('touchmove',(e)=>{ if(!lookDown) return; const nx=e.touches[0].clientX, ny=e.touches[0].clientY; const dx=(nx-lastTouch.x)/200, dy=(ny-lastTouch.y)/200; controls.getObject().rotation.y -= dx; camera.rotation.x -= dy; camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x)); lastTouch.x=nx; lastTouch.y=ny; }, {passive:false});
+lookLayer.addEventListener('touchend', ()=>{ lookDown=false; }, {passive:false});
+if(isMobile){ btnBreak.addEventListener('click', ()=> doBreak()); btnPlace.addEventListener('click', ()=> doPlace()); }
+
+// inventory UI
+const invEl = document.getElementById('inventory'); let selected = 1;
+function updateInventory(){ invEl.innerHTML=''; for(const t of TYPES){ if(t.id===0) continue; const div=document.createElement('div'); div.className='slot'+(t.id===selected? ' active':''); div.textContent=t.name; div.title=t.name; div.addEventListener('click', ()=> { selected=t.id; updateInventory(); }); invEl.appendChild(div); } }
+updateInventory();
+
+// interaction (desktop)
+renderer.domElement.addEventListener('pointerdown',(ev)=>{ if(ev.button===0) doBreak(); if(ev.button===2) doPlace(); });
+renderer.domElement.addEventListener('contextmenu',(e)=> e.preventDefault());
+renderer.domElement.addEventListener('click', ()=> { if(!isMobile) document.getElementById('loading').style.display='none'; });
+
+// game loop
+const clock = new THREE.Clock();
+let lastTouch={x:0,y:0}, lookDown=false;
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta());
+  // movement
+  const speed = 4.2; const dir = new THREE.Vector3();
+  if(move.fwd) dir.z -= 1; if(move.back) dir.z += 1; if(move.left) dir.x -= 1; if(move.right) dir.x += 1;
+  if(dir.lengthSq() > 0){ dir.normalize(); const yaw = controls.getObject().rotation.y; const sin=Math.sin(yaw), cos=Math.cos(yaw); const vx = dir.x * cos + dir.z * -sin; const vz = dir.x * sin + dir.z * cos; playerPos.x += vx * speed * dt; playerPos.z += vz * speed * dt; }
+  // gravity & ground
+  const px = Math.floor(playerPos.x), pz = Math.floor(playerPos.z);
+  let groundY = 0;
+  if(px>=0 && px<world.w && pz>=0 && pz<world.d){
+    for(let y=world.h-1;y>=0;y--){ if(blocks[idx(px,y,pz)] !== 0){ groundY = y+1; break; } }
+  }
+  if(playerPos.y > groundY + 1.6){ velocity.y += GRAVITY * dt; playerPos.y += velocity.y * dt; } else { playerPos.y = groundY + 1.6; velocity.y = 0; canJump = true; }
+  playerPos.x = Math.max(1, Math.min(world.w-1, playerPos.x)); playerPos.z = Math.max(1, Math.min(world.d-1, playerPos.z));
+  controls.getObject().position.set(playerPos.x, playerPos.y, playerPos.z);
+  camera.updateMatrixWorld();
+  renderer.render(scene, camera);
+}
+animate();
+
+// done loading
+document.getElementById('loading').style.display='none';
+window.addEventListener('resize', ()=> { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+</script>
+</body>
+</html>
